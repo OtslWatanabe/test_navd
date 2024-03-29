@@ -23,6 +23,7 @@ void print_dev_info(void);
 void sig(int s);
 int send_ev(spnav_event& sev);
 void hex_dump(const unsigned char* p, int  size, bool with_address);
+void dec_dump(int counter, const int* p, int  size, bool with_address);
 bool bSendCan = true;
 
 
@@ -148,11 +149,11 @@ int send_ev(spnav_event& sev)
 		//5.Set send data
 		frame.can_id = 0x111;
 		frame.can_dlc = 8;
-		frame.data[0] = 0;
-		frame.data[1] = 0;
-		frame.data[2] = 0;
-		frame.data[3] = 0;
-		frame.data[4] = (j >> 24) & 0xff;
+		frame.data[0] = sev.motion.x & 0xff;
+		frame.data[1] = sev.motion.y & 0xff;
+		frame.data[2] = sev.motion.z & 0xff;
+		frame.data[3] = sev.motion.rx & 0xff;
+		frame.data[4] = sev.motion.ry & 0xff;
 		frame.data[5] = (j >> 16) & 0xff;
 		frame.data[6] = (j >> 8) & 0xff;
 		frame.data[7] = j & 0xff;
@@ -172,6 +173,19 @@ int send_ev(spnav_event& sev)
 		frame.data[7] = j & 0xff;
 	}
 
+#if 1
+	int nTmp[8] = {0};
+	int indexTmp = 0;
+	nTmp[indexTmp++] = frame.can_id;
+	nTmp[indexTmp++] = sev.motion.x;
+	nTmp[indexTmp++] = sev.motion.y;
+	nTmp[indexTmp++] = sev.motion.z;
+	nTmp[indexTmp++] = sev.motion.rx;
+	nTmp[indexTmp++] = sev.motion.ry;
+	nTmp[indexTmp++] = sev.motion.rz;
+
+	dec_dump( j, nTmp, sizeof(nTmp)/sizeof(nTmp[0]), true );
+#else
 	unsigned char chTmp[16] = {0};
 	chTmp[0] = (frame.can_id >> 24) & 0xff;
 	chTmp[1] = (frame.can_id >> 16) & 0xff;
@@ -180,8 +194,8 @@ int send_ev(spnav_event& sev)
 	for (int ii=0; ii<8; ii++) {
 		chTmp[8+ii] = frame.data[ii];		
 	}
-
 	hex_dump( chTmp, sizeof chTmp, true );
+#endif
 
     //6.Send message
     nbytes = write(s, &frame, sizeof(frame)); 
@@ -266,6 +280,102 @@ static void _do_dump_hex(unsigned char c) {
     else {
         printf( "%s%02x%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
     }
+}
+
+/************************************************************/
+/* 								*/
+/************************************************************/
+static void _do_dump_dechex(int v) {
+    if (v) {
+        printf( "%s%02x%02x%s ", DBG_COLOR_WHITE, (v>>8)&0xff, v&0xff, DBG_EOF_COLOR );
+    }
+    else {
+        printf( "%s0000%s ", DBG_COLOR_GRAY, DBG_EOF_COLOR );
+    }
+}
+
+
+/************************************************************/
+/* 								*/
+/************************************************************/
+static void _do_dump_dec(int index, int c) {
+		switch(index) {
+		default:
+			if (c) {
+				printf( "%s%4d%s ", DBG_COLOR_WHITE, c, DBG_EOF_COLOR );
+			}
+			else {
+		        printf( "%s%4d%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
+			}
+			break;
+		case 1:
+		case 2:
+		case 3:
+			if (c) {
+				printf( "%s%4d%s ", DBG_COLOR_WHITE, c, DBG_EOF_COLOR );
+			}
+			else {
+				printf( "%s%4d%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
+			}
+			break;
+		case 4:
+		case 5:
+		case 6:
+			if (c) {
+				printf( "%s%4d%s ", DBG_COLOR_GREEN, c, DBG_EOF_COLOR );
+			}
+			else {
+				printf( "%s%4d%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
+			}
+			break;
+		}
+}
+
+/************************************************************/
+/* 								*/
+/************************************************************/
+void dec_dump(int counter, const int* p, int  size, bool with_address)
+{
+    // pthread_mutex_lock(&mutex_test_common);
+
+    int* d = (int *) p;
+    int remain = size;
+    int col_count = 16;
+
+    while(remain>col_count ) {
+        if (with_address) {
+    		printf("%08X: ", counter);
+        }
+
+        for (int ii=0; ii<col_count; ii++) {
+	        int v = *(d+ii);
+			if (ii) {
+	            _do_dump_dec(ii, v);
+			}
+			else {
+	            _do_dump_dechex(v);
+			}
+        }
+        printf("\n");
+        remain -= col_count;
+        d += col_count;
+    }
+
+    if (with_address) {
+    	printf("%08X: ", counter);
+    }
+    for (int ii=0; ii<remain; ii++) {
+		int v = *(d+ii);
+		if (ii) {
+			_do_dump_dec(ii, v);
+		}
+		else {
+			_do_dump_dechex(v);
+		}
+    }
+    printf("\n");
+
+    // pthread_mutex_unlock(&mutex_test_common);
 }
 
 
