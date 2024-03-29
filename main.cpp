@@ -287,7 +287,18 @@ static void _do_dump_hex(unsigned char c) {
 /************************************************************/
 static void _do_dump_dechex(int v) {
     if (v) {
-        printf( "%s%02x%02x%s ", DBG_COLOR_WHITE, (v>>8)&0xff, v&0xff, DBG_EOF_COLOR );
+		switch(v) {
+		case 0x111:
+			printf( "%sRot.[%02x%02x]%s ", DBG_COLOR_CYAN, (v>>8)&0xff, v&0xff, DBG_EOF_COLOR );
+			break;
+		case 0x222:
+			printf( "%sBtnL[%02x%02x]%s ", DBG_COLOR_YELLOW, (v>>8)&0xff, v&0xff, DBG_EOF_COLOR );
+			break;
+		case 0x333:
+		default:
+			printf( "%sBtnR[%02x%02x]%s ", DBG_COLOR_MAGENDA, (v>>8)&0xff, v&0xff, DBG_EOF_COLOR );
+			break;
+		}
     }
     else {
         printf( "%s0000%s ", DBG_COLOR_GRAY, DBG_EOF_COLOR );
