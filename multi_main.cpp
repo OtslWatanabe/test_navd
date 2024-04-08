@@ -14,11 +14,13 @@
 #include <linux/can.h>
 #include <linux/can/raw.h>
 #include <time.h>
+#include <pthread.h>
+#include <spnav.h>
 
 
-#if defined(BUILD_AF_UNIX)
 void print_dev_info(void);
-#endif
+
+bool b_sig = false;
 
 void sig(int s);
 int send_ev(spnav_event& sev);
@@ -26,11 +28,72 @@ void hex_dump(const unsigned char* p, int  size, bool with_address);
 void dec_dump(int counter, const int* p, int  size, bool with_address);
 bool bSendCan = true;
 
+pthread_mutex_t g_mutex_recvdata;
+pthread_cond_t g_cond_recvdata;
 
+double get_timestamp(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double) ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+
+void* pump_thread(void* user_param)
+{
+	double prev_t = get_timestamp();
+	double t = get_timestamp();
+
+	while(!b_sig) {
+		t = get_timestamp();
+		if (t-prev_t > 10 * 1e-3) {
+			prev_t = t;
+		}
+	}
+	return nullptr;
+}
+
+
+void* spnav_thread(void* user_param)
+{
+
+	if(spnav_open()==-1) {
+		fprintf(stderr, "failed to connect to spacenavd\n");
+		return nullptr;
+	}
+
+	if (spnav_evmask(SPNAV_EVMASK_MOTION|SPNAV_EVMASK_BUTTON)==-1) {
+		return nullptr;
+	}
+
+	print_dev_info();
+
+
+	int ev_count = 0;
+	spnav_event sev;
+	while(spnav_wait_event(&sev) && !b_sig) {
+		switch(sev.type) {
+		case SPNAV_EVENT_MOTION:
+				// printf("[%u] got motion event: t(%d, %d, %d) ", ev_count, sev.motion.x, sev.motion.y, sev.motion.z);
+				// printf("r(%d, %d, %d)\n", sev.motion.rx, sev.motion.ry, sev.motion.rz);
+				break;
+
+		case SPNAV_EVENT_BUTTON:
+			// printf("[%u] got button %s event b(%d)\n", ev_count, sev.button.press ? "press" : "release", sev.button.bnum);
+			break;
+
+		default:
+			break;
+		}
+		ev_count++;
+	}
+	spnav_close();
+	return nullptr;
+}
 
 int main(int argc, char** argv)
 {
-	int ev_count = 0;
+	// int ev_count = 0;
 
 #if defined(BUILD_X11)
 	Display *dpy;
@@ -38,39 +101,17 @@ int main(int argc, char** argv)
 	unsigned long bpix;
 #endif
 
-	spnav_event sev;
+	pthread_mutex_init(&g_mutex_recvdata, NULL);
+	pthread_cond_init(&g_cond_recvdata, NULL);
 
 	signal(SIGINT, sig);
 
-#if defined(BUILD_X11)
+	pthread_t tid_pump;
+	pthread_create(&tid_pump, NULL, pump_thread, NULL);
 
-	if(!(dpy = XOpenDisplay(0))) {
-		fprintf(stderr, "failed to connect to the X server\n");
-		return 1;
-	}
-	bpix = BlackPixel(dpy, DefaultScreen(dpy));
-	win = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1, 1, 0, bpix, bpix);
+	pthread_t tid_spnav;
+	pthread_create(&tid_spnav, NULL, spnav_thread, NULL);
 
-	/* This actually registers our window with the driver for receiving
-	 * motion/button events through the 3dxsrv-compatible X11 protocol.
-	 */
-	if(spnav_x11_open(dpy, win) == -1) {
-		fprintf(stderr, "failed to connect to spacenavd\n");
-		return 1;
-	}
-
-#elif defined(BUILD_AF_UNIX)
-	if(spnav_open()==-1) {
-		fprintf(stderr, "failed to connect to spacenavd\n");
-		return 1;
-	}
-
-	spnav_evmask(SPNAV_EVMASK_MOTION|SPNAV_EVMASK_BUTTON);
-
-	print_dev_info();
-#else
-#error Unknown build type!
-#endif
 
 	/* spnav_wait_event() and spnav_poll_event(), will silently ignore any non-spnav X11 events.
 	 *
@@ -78,29 +119,29 @@ int main(int argc, char** argv)
 	 * and pass any ClientMessage events to spnav_x11_event, which will return the event type or
 	 * zero if it's not an spnav event (see spnav.h).
 	 */
-	while(spnav_wait_event(&sev)) {
-		if(sev.type == SPNAV_EVENT_MOTION) {
-			if (bSendCan) {
-				send_ev(sev);
-			}
-			else {
-				printf("[%u] got motion event: t(%d, %d, %d) ", ev_count, sev.motion.x, sev.motion.y, sev.motion.z);
-				printf("r(%d, %d, %d)\n", sev.motion.rx, sev.motion.ry, sev.motion.rz);
-			}
-		} else if(sev.type == SPNAV_EVENT_BUTTON ) {
-			if (bSendCan) {
-				send_ev(sev);
-			}
-			else {
-				printf("[%u] got button %s event b(%d)\n",ev_count,  sev.button.press ? "press" : "release", sev.button.bnum);
-			}
-		}
-		else {
-			// TODO: ???
-		}
-		ev_count++;
-	}
-	spnav_close();
+	// while(spnav_wait_event(&sev)) {
+	// 	if(sev.type == SPNAV_EVENT_MOTION) {
+	// 		if (bSendCan) {
+	// 			send_ev(sev);
+	// 		}
+	// 		else {
+	// 			printf("[%u] got motion event: t(%d, %d, %d) ", ev_count, sev.motion.x, sev.motion.y, sev.motion.z);
+	// 			printf("r(%d, %d, %d)\n", sev.motion.rx, sev.motion.ry, sev.motion.rz);
+	// 		}
+	// 	} else if(sev.type == SPNAV_EVENT_BUTTON ) {
+	// 		if (bSendCan) {
+	// 			send_ev(sev);
+	// 		}
+	// 		else {
+	// 			printf("[%u] got button %s event b(%d)\n",ev_count,  sev.button.press ? "press" : "release", sev.button.bnum);
+	// 		}
+	// 	}
+	// 	else {
+	// 		// TODO: ???
+	// 	}
+	// 	ev_count++;
+	// }
+	// spnav_close();
 	return EXIT_SUCCESS;
 }
 
@@ -252,7 +293,7 @@ void print_dev_info(void)
 void sig(int s)
 {
 	spnav_close();
-	exit(0);
+	b_sig = true;
 }
 
 
