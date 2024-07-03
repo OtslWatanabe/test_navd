@@ -34,5 +34,6 @@
 build
 single_test
 multi_test
+joy_test
 *.code-workspace
 
