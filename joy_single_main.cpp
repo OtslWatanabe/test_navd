@@ -1,9 +1,8 @@
-#include <stdio.h>
-#include <stdlib.h>
+// #include <stdlib.h>
 #include <signal.h>
 #include <X11/Xlib.h>
-#include <spnav.h>
 #include <time.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <net/if.h>
@@ -11,65 +10,75 @@
 #include <sys/socket.h>
 #include <linux/can.h>
 #include <linux/can/raw.h>
+#include <linux/joystick.h>
 #include <time.h>
 #include <pthread.h>
-#include <spnav.h>
+
+#include <iostream>
+#include <iomanip>
+#include <vector>
+#include <cstdio>
+#include <fcntl.h>
+#include <iostream>
+
+#ifndef BUILD_AF_UNIX
+#define BUILD_AF_UNIX
+#endif
+
+#define JOY_DEV "/dev/input/js0"
+
+using namespace std;
 
 
 #if defined(BUILD_AF_UNIX)
 void print_dev_info(void);
 #endif
 
+void print_dev_info(void);
+
+bool b_sig = false;
+
 void sig(int s);
-int send_ev(spnav_event& sev);
+int send_ev( int joy_fd, vector<char>& joy_button, vector<int>& joy_axis);
 void hex_dump(const unsigned char* p, int  size, bool with_address);
 void dec_dump(int counter, const int* p, int  size, bool with_address);
 bool bSendCan = true;
+
+pthread_mutex_t g_mutex_recvdata;
+pthread_cond_t g_cond_recvdata;
+
+double get_timestamp(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double) ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+
+
+void* pump_thread(void* user_param)
+{
+	double prev_t = get_timestamp();
+	double t = get_timestamp();
+
+	while(!b_sig) {
+		t = get_timestamp();
+		if (t-prev_t > 10 * 1e-3) {
+			prev_t = t;
+		}
+	}
+	return nullptr;
+}
 
 
 int main(int argc, char** argv)
 {
 	int ev_count = 0;
 
-#if defined(BUILD_X11)
-	Display *dpy;
-	Window win;
-	unsigned long bpix;
-#endif
-
-	spnav_event sev;
-
+	pthread_mutex_init(&g_mutex_recvdata, NULL);
+	pthread_cond_init(&g_cond_recvdata, NULL);
 	signal(SIGINT, sig);
 
-#if defined(BUILD_X11)
-
-	if(!(dpy = XOpenDisplay(0))) {
-		fprintf(stderr, "failed to connect to the X server\n");
-		return 1;
-	}
-	bpix = BlackPixel(dpy, DefaultScreen(dpy));
-	win = XCreateSimpleWindow(dpy, DefaultRootWindow(dpy), 0, 0, 1, 1, 0, bpix, bpix);
-
-	/* This actually registers our window with the driver for receiving
-	 * motion/button events through the 3dxsrv-compatible X11 protocol.
-	 */
-	if(spnav_x11_open(dpy, win) == -1) {
-		fprintf(stderr, "failed to connect to spacenavd\n");
-		return 1;
-	}
-
-#elif defined(BUILD_AF_UNIX)
-	if(spnav_open()==-1) {
-		fprintf(stderr, "failed to connect to spacenavd\n");
-		return 1;
-	}
-
-	spnav_evmask(SPNAV_EVMASK_MOTION|SPNAV_EVMASK_BUTTON);
-
-	print_dev_info();
-#else
-#error Unknown build type!
-#endif
 
 	/* spnav_wait_event() and spnav_poll_event(), will silently ignore any non-spnav X11 events.
 	 *
@@ -77,6 +86,38 @@ int main(int argc, char** argv)
 	 * and pass any ClientMessage events to spnav_x11_event, which will return the event type or
 	 * zero if it's not an spnav event (see spnav.h).
 	 */
+#if 1
+
+  int joy_fd(-1), num_of_axis(0), num_of_buttons(0);
+
+  char name_of_joystick[80];
+  vector<char> joy_button;
+  vector<int> joy_axis;
+
+  if((joy_fd=open(JOY_DEV,O_RDONLY)) < 0)
+  {
+    cerr<<"Failed to open "<<JOY_DEV<<endl;
+    return -1;
+  }
+
+  ioctl(joy_fd, JSIOCGAXES, &num_of_axis);
+  ioctl(joy_fd, JSIOCGBUTTONS, &num_of_buttons);
+  ioctl(joy_fd, JSIOCGNAME(80), &name_of_joystick);
+
+  joy_button.resize(num_of_buttons,0);
+  joy_axis.resize(num_of_axis,0);
+
+  cout<<"Joystick: "<<name_of_joystick<<endl
+    <<"  axis: "<<num_of_axis<<endl
+    <<"  buttons: "<<num_of_buttons<<endl;
+
+  fcntl(joy_fd, F_SETFL, O_NONBLOCK);   // using non-blocking mode
+
+  send_ev(joy_fd, joy_button, joy_axis);
+
+  close(joy_fd);
+
+#else
 	while(spnav_wait_event(&sev)) {
 		if(sev.type == SPNAV_EVENT_MOTION) {
 			if (bSendCan) {
@@ -100,13 +141,13 @@ int main(int argc, char** argv)
 		ev_count++;
 	}
 	spnav_close();
+#endif
+
 	return EXIT_SUCCESS;
 }
 
 
-
-
-int send_ev(spnav_event& sev)
+int send_ev( int joy_fd, vector<char>& joy_button, vector<int>& joy_axis)
 {
 	static int j = 0;
     int ret;
@@ -139,62 +180,65 @@ int send_ev(spnav_event& sev)
     //4.Disable filtering rules, do not receive packets, only send
     setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, NULL, 0);
 
+
+	while(true)
+	{
+		js_event jsev;
+		read(joy_fd, &jsev, sizeof(js_event));
+
+		switch (jsev.type & ~JS_EVENT_INIT)
+		{
+		case JS_EVENT_AXIS:
+			if((int)jsev.number>=joy_axis.size())  {cerr<<"err:"<<(int)jsev.number<<endl;}
+			joy_axis[(int)jsev.number]= jsev.value;
+			break;
+
+		case JS_EVENT_BUTTON:
+			if((int)jsev.number>=joy_button.size())  {cerr<<"err:"<<(int)jsev.number<<endl; }
+			joy_button[(int)jsev.number]= jsev.value;
+			break;
+		}
+
+		const int axis_unit = 1000;
+		cout<<"axis/" << axis_unit << ": ";
+		for(size_t i(0);i<joy_axis.size();++i)
+			cout<<" "<<setw(2)<<joy_axis[i]/axis_unit;
+
+		cout<<"  button: ";
+		for(size_t i(0);i<joy_button.size();++i)
+			cout<<" "<<(int)joy_button[i];
+		cout<<endl;
+		usleep(100);
+	}
+
     struct can_frame frame;
     memset(&frame, 0, sizeof(struct can_frame));
 
-	if(sev.type == SPNAV_EVENT_MOTION) {
 		// printf("[%u] got motion event: t(%d, %d, %d) ", ev_count, sev.motion.x, sev.motion.y, sev.motion.z);
 		// printf("r(%d, %d, %d)\n", sev.motion.rx, sev.motion.ry, sev.motion.rz);
 		//5.Set send data
 		frame.can_id = 0x111;
 		frame.can_dlc = 8;
-		frame.data[0] = sev.motion.x & 0xff;
-		frame.data[1] = sev.motion.y & 0xff;
-		frame.data[2] = sev.motion.z & 0xff;
-		frame.data[3] = sev.motion.rx & 0xff;
-		frame.data[4] = sev.motion.ry & 0xff;
-		frame.data[5] = (j >> 16) & 0xff;
-		frame.data[6] = (j >> 8) & 0xff;
-		frame.data[7] = j & 0xff;
+		// frame.data[0] = jsev.x & 0xff;
+		// frame.data[1] = jsev.y & 0xff;
+		// frame.data[2] = jsev.buttons & 1)? 1 : 0;
+		// frame.data[3] = sev.motion.rx & 0xff;
+		// frame.data[4] = sev.motion.ry & 0xff;
+		// frame.data[5] = (j >> 16) & 0xff;
+		// frame.data[6] = (j >> 8) & 0xff;
+		// frame.data[7] = j & 0xff;
 
-	} else if(sev.type == SPNAV_EVENT_BUTTON ) {
-		// printf("[%u] got button %s event b(%d)\n",ev_count,  sev.button.press ? "press" : "release", sev.button.bnum);
-		//5.Set send data
-		frame.can_id = 0x222 + 0x111 * sev.button.bnum;
-		frame.can_dlc = 1;
-		frame.data[0] = sev.button.bnum;
-		frame.data[1] = sev.button.press ? 1 : 0;
-		frame.data[2] = 0;
-		frame.data[3] = 0;
-		frame.data[4] = (j >> 24) & 0xff;
-		frame.data[5] = (j >> 16) & 0xff;
-		frame.data[6] = (j >> 8) & 0xff;
-		frame.data[7] = j & 0xff;
-	}
-
-#if 1
 	int nTmp[8] = {0};
 	int indexTmp = 0;
-	nTmp[indexTmp++] = frame.can_id;
-	nTmp[indexTmp++] = sev.motion.x;
-	nTmp[indexTmp++] = sev.motion.y;
-	nTmp[indexTmp++] = sev.motion.z;
-	nTmp[indexTmp++] = sev.motion.rx;
-	nTmp[indexTmp++] = sev.motion.ry;
-	nTmp[indexTmp++] = sev.motion.rz;
+	// nTmp[indexTmp++] = frame.can_id;
+	// nTmp[indexTmp++] = sev.motion.x;
+	// nTmp[indexTmp++] = sev.motion.y;
+	// nTmp[indexTmp++] = sev.motion.z;
+	// nTmp[indexTmp++] = sev.motion.rx;
+	// nTmp[indexTmp++] = sev.motion.ry;
+	// nTmp[indexTmp++] = sev.motion.rz;
 
 	dec_dump( j, nTmp, sizeof(nTmp)/sizeof(nTmp[0]), true );
-#else
-	unsigned char chTmp[16] = {0};
-	chTmp[0] = (frame.can_id >> 24) & 0xff;
-	chTmp[1] = (frame.can_id >> 16) & 0xff;
-	chTmp[2] = (frame.can_id >> 8) & 0xff;
-	chTmp[3] = (frame.can_id >> 0) & 0xff;
-	for (int ii=0; ii<8; ii++) {
-		chTmp[8+ii] = frame.data[ii];		
-	}
-	hex_dump( chTmp, sizeof chTmp, true );
-#endif
 
     //6.Send message
     nbytes = write(s, &frame, sizeof(frame)); 
@@ -225,32 +269,31 @@ void print_dev_info(void)
 	int proto;
 	char buf[256];
 
-	if((proto = spnav_protocol()) == -1) {
-		fprintf(stderr, "failed to query protocol version\n");
-		return;
-	}
+	// if((proto = spnav_protocol()) == -1) {
+	// 	fprintf(stderr, "failed to query protocol version\n");
+	// 	return;
+	// }
 
-	printf("spacenav AF_UNIX protocol version: %d\n", proto);
+	// printf("spacenav AF_UNIX protocol version: %d\n", proto);
 
-	spnav_client_name("simple example");
+	// spnav_client_name("simple example");
 
-	if(proto >= 1) {
-		spnav_dev_name(buf, sizeof(buf));
-		printf("Device: %s\n", buf);
-		spnav_dev_path(buf, sizeof(buf));
-		printf("Path: %s\n", buf);
-		printf("Buttons: %d\n", spnav_dev_buttons());
-		printf("Axes: %d\n", spnav_dev_axes());
-	}
+	// if(proto >= 1) {
+	// 	spnav_dev_name(buf, sizeof(buf));
+	// 	printf("Device: %s\n", buf);
+	// 	spnav_dev_path(buf, sizeof(buf));
+	// 	printf("Path: %s\n", buf);
+	// 	printf("Buttons: %d\n", spnav_dev_buttons());
+	// 	printf("Axes: %d\n", spnav_dev_axes());
+	// }
 
-	putchar('\n');
+	// putchar('\n');
 }
 
 #endif
 
 void sig(int s)
 {
-	spnav_close();
 	exit(0);
 }
 
@@ -468,4 +511,3 @@ void simple_dump(char *pstr, int str_size)
 {
     hex_dump((const unsigned char*) pstr, str_size, false);
 }
-
