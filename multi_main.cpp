@@ -17,6 +17,10 @@
 #include <pthread.h>
 #include <spnav.h>
 
+#ifndef BUILD_AF_UNIX
+#define BUILD_AF_UNIX
+#endif
+
 
 void print_dev_info(void);
 

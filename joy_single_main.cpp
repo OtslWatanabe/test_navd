@@ -39,7 +39,7 @@ void print_dev_info(void);
 bool b_sig = false;
 
 void sig(int s);
-int send_ev( int joy_fd, vector<char>& joy_button, vector<int>& joy_axis);
+int send_ev( int joy_fd, js_event jsev, vector<char>& joy_button, vector<int>& joy_axis);
 void hex_dump(const unsigned char* p, int  size, bool with_address);
 void dec_dump(int counter, const int* p, int  size, bool with_address);
 bool bSendCan = true;
@@ -49,9 +49,9 @@ pthread_cond_t g_cond_recvdata;
 
 double get_timestamp(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (double) ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return (double) ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
 
@@ -73,7 +73,6 @@ void* pump_thread(void* user_param)
 
 int main(int argc, char** argv)
 {
-	int ev_count = 0;
 
 	pthread_mutex_init(&g_mutex_recvdata, NULL);
 	pthread_cond_init(&g_cond_recvdata, NULL);
@@ -86,18 +85,19 @@ int main(int argc, char** argv)
 	 * and pass any ClientMessage events to spnav_x11_event, which will return the event type or
 	 * zero if it's not an spnav event (see spnav.h).
 	 */
-#if 1
 
-  int joy_fd(-1), num_of_axis(0), num_of_buttons(0);
+  int joy_fd = -1;
+  int num_of_axis = 0;
+  int num_of_buttons = 0;
 
-  char name_of_joystick[80];
+  char name_of_joystick[80] = {0,}; 
   vector<char> joy_button;
   vector<int> joy_axis;
 
   if((joy_fd=open(JOY_DEV,O_RDONLY)) < 0)
   {
-    cerr<<"Failed to open "<<JOY_DEV<<endl;
-    return -1;
+	cerr<<"Failed to open "<<JOY_DEV<<endl;
+	return -1;
   }
 
   ioctl(joy_fd, JSIOCGAXES, &num_of_axis);
@@ -108,156 +108,145 @@ int main(int argc, char** argv)
   joy_axis.resize(num_of_axis,0);
 
   cout<<"Joystick: "<<name_of_joystick<<endl
-    <<"  axis: "<<num_of_axis<<endl
-    <<"  buttons: "<<num_of_buttons<<endl;
+	<<"  axis: "<<num_of_axis<<endl
+	<<"  buttons: "<<num_of_buttons<<endl;
 
   fcntl(joy_fd, F_SETFL, O_NONBLOCK);   // using non-blocking mode
 
-  send_ev(joy_fd, joy_button, joy_axis);
 
-  close(joy_fd);
-
-#else
-	while(spnav_wait_event(&sev)) {
-		if(sev.type == SPNAV_EVENT_MOTION) {
+	while(!b_sig)
+	{
+		js_event jsev;
+		while (read (joy_fd, &jsev, sizeof(jsev)) > 0) {
 			if (bSendCan) {
-				send_ev(sev);
-			}
-			else {
-				printf("[%u] got motion event: t(%d, %d, %d) ", ev_count, sev.motion.x, sev.motion.y, sev.motion.z);
-				printf("r(%d, %d, %d)\n", sev.motion.rx, sev.motion.ry, sev.motion.rz);
-			}
-		} else if(sev.type == SPNAV_EVENT_BUTTON ) {
-			if (bSendCan) {
-				send_ev(sev);
-			}
-			else {
-				printf("[%u] got button %s event b(%d)\n",ev_count,  sev.button.press ? "press" : "release", sev.button.bnum);
+				send_ev(joy_fd, jsev, joy_button, joy_axis);
 			}
 		}
-		else {
-			// TODO: ???
+		/* EAGAIN is returned when the queue is empty */
+		if (errno != EAGAIN) {
+				/* error */
 		}
-		ev_count++;
+		/* do something interesting with processed events */
 	}
-	spnav_close();
-#endif
 
+	close(joy_fd);
 	return EXIT_SUCCESS;
 }
 
 
-int send_ev( int joy_fd, vector<char>& joy_button, vector<int>& joy_axis)
+int send_ev( int joy_fd, js_event jsev, vector<char>& joy_button, vector<int>& joy_axis)
 {
+	int ev_count = 0;
+
 	static int j = 0;
-    int ret;
-    int s, nbytes;
-    struct sockaddr_can addr;
-    struct ifreq ifr;
+	int ret;
+	int fd_can, nbytes;
+	struct sockaddr_can addr;
+	struct ifreq ifr;
 
-    s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
-    if (s < 0) {
-        perror("socket PF_CAN failed");
-        return 1;
-    }
-    
-    //2.Specify can0 device
-    strcpy(ifr.ifr_name, "can0");
-    ret = ioctl(s, SIOCGIFINDEX, &ifr);
-    if (ret < 0) {
-        perror("ioctl failed");
-        return 1;
-    }
-
-    //3.Bind the socket to can0
-    addr.can_family = AF_CAN;
-    addr.can_ifindex = ifr.ifr_ifindex;
-    ret = bind(s, (struct sockaddr *)&addr, sizeof(addr));
-    if (ret < 0) {
-        perror("bind failed");
-        return 1;
-    }
-    //4.Disable filtering rules, do not receive packets, only send
-    setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, NULL, 0);
-
-
-	while(true)
-	{
-		js_event jsev;
-		read(joy_fd, &jsev, sizeof(js_event));
-
-		switch (jsev.type & ~JS_EVENT_INIT)
-		{
-		case JS_EVENT_AXIS:
-			if((int)jsev.number>=joy_axis.size())  {cerr<<"err:"<<(int)jsev.number<<endl;}
-			joy_axis[(int)jsev.number]= jsev.value;
-			break;
-
-		case JS_EVENT_BUTTON:
-			if((int)jsev.number>=joy_button.size())  {cerr<<"err:"<<(int)jsev.number<<endl; }
-			joy_button[(int)jsev.number]= jsev.value;
-			break;
-		}
-
-		const int axis_unit = 1000;
-		cout<<"axis/" << axis_unit << ": ";
-		for(size_t i(0);i<joy_axis.size();++i)
-			cout<<" "<<setw(2)<<joy_axis[i]/axis_unit;
-
-		cout<<"  button: ";
-		for(size_t i(0);i<joy_button.size();++i)
-			cout<<" "<<(int)joy_button[i];
-		cout<<endl;
-		usleep(100);
+	fd_can = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+	if (fd_can < 0) {
+		perror("socket PF_CAN failed");
+		return 1;
+	}
+	
+	//2.Specify can0 device
+	strcpy(ifr.ifr_name, "can0");
+	ret = ioctl(fd_can, SIOCGIFINDEX, &ifr);
+	if (ret < 0) {
+		perror("ioctl failed");
+		return 1;
 	}
 
-    struct can_frame frame;
-    memset(&frame, 0, sizeof(struct can_frame));
+	//3.Bind the socket to can0
+	addr.can_family = AF_CAN;
+	addr.can_ifindex = ifr.ifr_ifindex;
+	ret = bind(fd_can, (struct sockaddr *)&addr, sizeof(addr));
+	if (ret < 0) {
+		perror("bind failed");
+		return 1;
+	}
+	//4.Disable filtering rules, do not receive packets, only send
+	setsockopt(fd_can, SOL_CAN_RAW, CAN_RAW_FILTER, NULL, 0);
 
-		// printf("[%u] got motion event: t(%d, %d, %d) ", ev_count, sev.motion.x, sev.motion.y, sev.motion.z);
-		// printf("r(%d, %d, %d)\n", sev.motion.rx, sev.motion.ry, sev.motion.rz);
-		//5.Set send data
-		frame.can_id = 0x111;
-		frame.can_dlc = 8;
-		// frame.data[0] = jsev.x & 0xff;
-		// frame.data[1] = jsev.y & 0xff;
-		// frame.data[2] = jsev.buttons & 1)? 1 : 0;
-		// frame.data[3] = sev.motion.rx & 0xff;
-		// frame.data[4] = sev.motion.ry & 0xff;
-		// frame.data[5] = (j >> 16) & 0xff;
-		// frame.data[6] = (j >> 8) & 0xff;
-		// frame.data[7] = j & 0xff;
 
-	int nTmp[8] = {0};
-	int indexTmp = 0;
-	// nTmp[indexTmp++] = frame.can_id;
-	// nTmp[indexTmp++] = sev.motion.x;
-	// nTmp[indexTmp++] = sev.motion.y;
-	// nTmp[indexTmp++] = sev.motion.z;
-	// nTmp[indexTmp++] = sev.motion.rx;
-	// nTmp[indexTmp++] = sev.motion.ry;
-	// nTmp[indexTmp++] = sev.motion.rz;
+				// process_event (jsev);
 
-	dec_dump( j, nTmp, sizeof(nTmp)/sizeof(nTmp[0]), true );
+			switch (jsev.type & ~JS_EVENT_INIT)
+			{
+			case JS_EVENT_AXIS:
+				if((int)jsev.number>=joy_axis.size())  {cerr<<"err:"<<(int)jsev.number<<endl;}
+				joy_axis[(int)jsev.number]= jsev.value;
+				break;
 
-    //6.Send message
-    nbytes = write(s, &frame, sizeof(frame)); 
+			case JS_EVENT_BUTTON:
+				if((int)jsev.number>=joy_button.size())  {cerr<<"err:"<<(int)jsev.number<<endl; }
+				joy_button[(int)jsev.number]= jsev.value;
+				break;
+			}
 
-    if(nbytes != sizeof(frame)) {
-        printf("Send Error frame[0]!\r\n");
-		close (s);
-			system("sudo ifconfig can0 down");
-		sleep(1);
-			system("sudo ip link set can0 type can bitrate 500000");
-			system("sudo ifconfig can0 up");
-    }
-    else {
-		usleep(1000);
+			cout<< jsev.time << ": ";
 
-		//Close the socket and can0
-		close(s);
-    }
-	j++;
+			const int axis_unit = 1000;
+			cout<<"axis/" << axis_unit << ": ";
+			for(size_t i(0);i<joy_axis.size();++i)
+				cout<<" "<<setw(2)<<joy_axis[i]/axis_unit;
+
+			cout<<"  button: ";
+			for(size_t i(0);i<joy_button.size();++i)
+				cout<<" "<<(int)joy_button[i];
+			cout<<endl;
+
+			ev_count++;
+
+			struct can_frame frame;
+			memset(&frame, 0, sizeof(struct can_frame));
+
+			// printf("[%u] got motion event: t(%d, %d, %d) ", ev_count, sev.motion.x, sev.motion.y, sev.motion.z);
+			// printf("r(%d, %d, %d)\n", sev.motion.rx, sev.motion.ry, sev.motion.rz);
+			//5.Set send data
+			frame.can_id = 0x111;
+			frame.can_dlc = 8;
+			frame.data[0] = joy_axis[0] & 0xff;
+			frame.data[1] = joy_axis[1] & 0xff;
+			frame.data[2] = joy_axis[2] & 0xff;
+			frame.data[3] = joy_axis[3] & 0xff;
+			// frame.data[4] = sev.motion.ry & 0xff;
+			// frame.data[5] = (j >> 16) & 0xff;
+			// frame.data[6] = (j >> 8) & 0xff;
+			// frame.data[7] = j & 0xff;
+
+			int nTmp[8] = {0};
+			int indexTmp = 0;
+			nTmp[indexTmp++] = frame.can_id;
+			nTmp[indexTmp++] = joy_axis[0] & 0xff;
+			nTmp[indexTmp++] = joy_axis[1] & 0xff;
+			nTmp[indexTmp++] = joy_axis[2] & 0xff;
+			nTmp[indexTmp++] = joy_axis[3] & 0xff;
+			// nTmp[indexTmp++] = jsev.motion.ry;
+			// nTmp[indexTmp++] = jsev.motion.rz;
+
+			// KW dec_dump( j, nTmp, sizeof(nTmp)/sizeof(nTmp[0]), true );
+
+			//6.Send message
+			nbytes = write(fd_can, &frame, sizeof(frame)); 
+
+			if(nbytes != sizeof(frame)) {
+				printf("Send Error frame[0]: %d - %d!\r\n",nbytes, (int)sizeof(frame) );
+				close (fd_can);
+					system("sudo ifconfig can0 down");
+				sleep(1);
+					system("sudo ip link set can0 type can bitrate 500000");
+					system("sudo ifconfig can0 up");
+			}
+			else {
+				usleep(1000);
+				//Close the socket and can0
+				close(fd_can);
+			}
+			j++;
+			ev_count++;
+
 	return 0;
 }
 
@@ -266,8 +255,8 @@ int send_ev( int joy_fd, vector<char>& joy_button, vector<int>& joy_axis)
 #if defined(BUILD_AF_UNIX)
 void print_dev_info(void)
 {
-	int proto;
-	char buf[256];
+	// int proto;
+	// char buf[256];
 
 	// if((proto = spnav_protocol()) == -1) {
 	// 	fprintf(stderr, "failed to query protocol version\n");
@@ -316,19 +305,19 @@ void sig(int s)
 /* 								*/
 /************************************************************/
 static void _do_dump_hex(unsigned char c) {
-    if (c) {
-        printf( "%s%02x%s ", DBG_COLOR_WHITE, c, DBG_EOF_COLOR );
-    }
-    else {
-        printf( "%s%02x%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
-    }
+	if (c) {
+		printf( "%s%02x%s ", DBG_COLOR_WHITE, c, DBG_EOF_COLOR );
+	}
+	else {
+		printf( "%s%02x%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
+	}
 }
 
 /************************************************************/
 /* 								*/
 /************************************************************/
 static void _do_dump_dechex(int v) {
-    if (v) {
+	if (v) {
 		switch(v) {
 		case 0x111:
 			printf( "%sRot.[%02x%02x]%s ", DBG_COLOR_CYAN, (v>>8)&0xff, v&0xff, DBG_EOF_COLOR );
@@ -341,10 +330,10 @@ static void _do_dump_dechex(int v) {
 			printf( "%sBtnR[%02x%02x]%s ", DBG_COLOR_MAGENDA, (v>>8)&0xff, v&0xff, DBG_EOF_COLOR );
 			break;
 		}
-    }
-    else {
-        printf( "%s0000%s ", DBG_COLOR_GRAY, DBG_EOF_COLOR );
-    }
+	}
+	else {
+		printf( "%s0000%s ", DBG_COLOR_GRAY, DBG_EOF_COLOR );
+	}
 }
 
 
@@ -358,7 +347,7 @@ static void _do_dump_dec(int index, int c) {
 				printf( "%s%4d%s ", DBG_COLOR_WHITE, c, DBG_EOF_COLOR );
 			}
 			else {
-		        printf( "%s%4d%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
+				printf( "%s%4d%s ", DBG_COLOR_GRAY, c, DBG_EOF_COLOR );
 			}
 			break;
 		case 1:
@@ -389,35 +378,35 @@ static void _do_dump_dec(int index, int c) {
 /************************************************************/
 void dec_dump(int counter, const int* p, int  size, bool with_address)
 {
-    // pthread_mutex_lock(&mutex_test_common);
+	// pthread_mutex_lock(&mutex_test_common);
 
-    int* d = (int *) p;
-    int remain = size;
-    int col_count = 16;
+	int* d = (int *) p;
+	int remain = size;
+	int col_count = 16;
 
-    while(remain>col_count ) {
-        if (with_address) {
-    		printf("%08X: ", counter);
-        }
+	while(remain>col_count ) {
+		if (with_address) {
+			printf("%08X: ", counter);
+		}
 
-        for (int ii=0; ii<col_count; ii++) {
-	        int v = *(d+ii);
+		for (int ii=0; ii<col_count; ii++) {
+			int v = *(d+ii);
 			if (ii) {
-	            _do_dump_dec(ii, v);
+				_do_dump_dec(ii, v);
 			}
 			else {
-	            _do_dump_dechex(v);
+				_do_dump_dechex(v);
 			}
-        }
-        printf("\n");
-        remain -= col_count;
-        d += col_count;
-    }
+		}
+		printf("\n");
+		remain -= col_count;
+		d += col_count;
+	}
 
-    if (with_address) {
-    	printf("%08X: ", counter);
-    }
-    for (int ii=0; ii<remain; ii++) {
+	if (with_address) {
+		printf("%08X: ", counter);
+	}
+	for (int ii=0; ii<remain; ii++) {
 		int v = *(d+ii);
 		if (ii) {
 			_do_dump_dec(ii, v);
@@ -425,10 +414,10 @@ void dec_dump(int counter, const int* p, int  size, bool with_address)
 		else {
 			_do_dump_dechex(v);
 		}
-    }
-    printf("\n");
+	}
+	printf("\n");
 
-    // pthread_mutex_unlock(&mutex_test_common);
+	// pthread_mutex_unlock(&mutex_test_common);
 }
 
 
@@ -436,11 +425,11 @@ void dec_dump(int counter, const int* p, int  size, bool with_address)
 /* 								*/
 /************************************************************/
 static void _do_dump_char(unsigned char c) {    if (c) {
-        printf( "%s%c%s", DBG_COLOR_WHITE,  c<0x20 || 0x7f<c ? '.': c, DBG_EOF_COLOR );
-    }
-    else {
-        printf( "%s%c%s", DBG_COLOR_GRAY,  c<0x20 || 0x7f<c ? '.': c, DBG_EOF_COLOR );
-    }
+		printf( "%s%c%s", DBG_COLOR_WHITE,  c<0x20 || 0x7f<c ? '.': c, DBG_EOF_COLOR );
+	}
+	else {
+		printf( "%s%c%s", DBG_COLOR_GRAY,  c<0x20 || 0x7f<c ? '.': c, DBG_EOF_COLOR );
+	}
 }
 
 
@@ -449,56 +438,56 @@ static void _do_dump_char(unsigned char c) {    if (c) {
 /************************************************************/
 void hex_dump(const unsigned char* p, int  size, bool with_address)
 {
-    // pthread_mutex_lock(&mutex_test_common);
+	// pthread_mutex_lock(&mutex_test_common);
 
-    char* d = (char *) p;
-    int remain = size;
-    int col_count = 16;
+	char* d = (char *) p;
+	int remain = size;
+	int col_count = 16;
 
-    while(remain>col_count ) {
-        if (with_address) {
-    		printf("%04X: ", size-remain);
-        }
+	while(remain>col_count ) {
+		if (with_address) {
+			printf("%04X: ", size-remain);
+		}
 
-        for (int ii=0; ii<col_count; ii++) {
-	        unsigned char v = *((unsigned char *)d+ii);
-            _do_dump_hex(v);
-            // printf("%02X ", v);
-        }
-        printf("   ");
-        for (int ii=0; ii<col_count; ii++) {
-	        unsigned char v = *((unsigned char *)d+ii);
-            _do_dump_char(v);
-            // printf("%c", v<0x20 || 0x7f<v ? '.': v);
-        }
-        printf("\n");
-        remain -= col_count;
-        d += col_count;
-    }
+		for (int ii=0; ii<col_count; ii++) {
+			unsigned char v = *((unsigned char *)d+ii);
+			_do_dump_hex(v);
+			// printf("%02X ", v);
+		}
+		printf("   ");
+		for (int ii=0; ii<col_count; ii++) {
+			unsigned char v = *((unsigned char *)d+ii);
+			_do_dump_char(v);
+			// printf("%c", v<0x20 || 0x7f<v ? '.': v);
+		}
+		printf("\n");
+		remain -= col_count;
+		d += col_count;
+	}
 
-    if (with_address) {
-    	printf("%04X: ", size-remain);
-    }
-    for (int ii=0; ii<remain; ii++) {
+	if (with_address) {
+		printf("%04X: ", size-remain);
+	}
+	for (int ii=0; ii<remain; ii++) {
 		unsigned char v = *((unsigned char *)d+ii);
-        // printf("%02X ", v);
-        _do_dump_hex(v);
-    }
-    for (int ii=0; ii<col_count-remain; ii++) {
-        printf(".. ");
-    }
-    printf("    ");
-    for (int ii=0; ii<remain; ii++) {
-        unsigned char v = *((unsigned char *)d+ii);
-        // printf("%c",v<0x20 || 0x7f<v ? '.': v);
-        _do_dump_char(v);
-    }
-    for (int ii=0; ii<col_count-remain; ii++) {
-        printf(".");
-    }
-    printf("\n");
+		// printf("%02X ", v);
+		_do_dump_hex(v);
+	}
+	for (int ii=0; ii<col_count-remain; ii++) {
+		printf(".. ");
+	}
+	printf("    ");
+	for (int ii=0; ii<remain; ii++) {
+		unsigned char v = *((unsigned char *)d+ii);
+		// printf("%c",v<0x20 || 0x7f<v ? '.': v);
+		_do_dump_char(v);
+	}
+	for (int ii=0; ii<col_count-remain; ii++) {
+		printf(".");
+	}
+	printf("\n");
 
-    // pthread_mutex_unlock(&mutex_test_common);
+	// pthread_mutex_unlock(&mutex_test_common);
 }
 
 
@@ -509,5 +498,5 @@ void hex_dump(const unsigned char* p, int  size, bool with_address)
 
 void simple_dump(char *pstr, int str_size)
 {
-    hex_dump((const unsigned char*) pstr, str_size, false);
+	hex_dump((const unsigned char*) pstr, str_size, false);
 }
