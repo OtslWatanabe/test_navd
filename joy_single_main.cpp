@@ -20,6 +20,8 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <iostream>
+#include "main.h"
+
 
 #ifndef BUILD_AF_UNIX
 #define BUILD_AF_UNIX
@@ -36,7 +38,7 @@ void print_dev_info(void);
 
 void print_dev_info(void);
 
-bool b_sig = false;
+bool b_abort = false;
 
 void sig(int s);
 int send_ev( int joy_fd, js_event jsev, vector<char>& joy_button, vector<int>& joy_axis);
@@ -61,7 +63,7 @@ void* pump_thread(void* user_param)
 	double prev_t = get_timestamp();
 	double t = get_timestamp();
 
-	while(!b_sig) {
+	while(!b_abort) {
 		t = get_timestamp();
 		if (t-prev_t > 10 * 1e-3) {
 			prev_t = t;
@@ -114,7 +116,7 @@ int main(int argc, char** argv)
   fcntl(joy_fd, F_SETFL, O_NONBLOCK);   // using non-blocking mode
 
 
-	while(!b_sig)
+	while(!b_abort)
 	{
 		js_event jsev;
 		while (read (joy_fd, &jsev, sizeof(jsev)) > 0) {
@@ -236,8 +238,15 @@ int send_ev( int joy_fd, js_event jsev, vector<char>& joy_button, vector<int>& j
 				close (fd_can);
 					system("sudo ifconfig can0 down");
 				sleep(1);
-					system("sudo ip link set can0 type can bitrate 500000");
-					system("sudo ifconfig can0 up");
+
+				char chbuf[128] = {0};
+				sprintf(chbuf,"sudo ip link set can0 type can bitrate %lu", CAN_BITRATE );
+				system(chbuf);
+
+				sprintf(chbuf,"sudo ifconfig can0 txqueuelen %lu", CAN_TXQUEUELEN );
+				system(chbuf);
+
+				system("sudo ip link set can0 up");
 			}
 			else {
 				usleep(1000);
