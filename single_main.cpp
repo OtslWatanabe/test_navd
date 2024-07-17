@@ -16,7 +16,8 @@
 #include <spnav.h>
 #include "main.h"
 
-#define	SEND_EV0
+#undef	SEND_EV0
+
 
 #if defined(BUILD_AF_UNIX)
 void print_dev_info(void);
@@ -33,7 +34,7 @@ bool bSendCan = true;
 int init_can()
 {
 	char chbuf[128] = {0};
-	sprintf(chbuf,"sudo ip link set can0 type can bitrate %lu", CAN_BITRATE );
+	sprintf(chbuf,"sudo ip link set can0 type can bitrate %lu restart-ms 100", CAN_BITRATE );
 	system(chbuf);
 
 	sprintf(chbuf,"sudo ifconfig can0 txqueuelen %lu", CAN_TXQUEUELEN );
@@ -200,21 +201,22 @@ bool send_ev(int s, spnav_event& sev)
 	nTmp[indexTmp++] = sev.motion.ry;
 	nTmp[indexTmp++] = sev.motion.rz;
 
-	// dec_dump( j, nTmp, sizeof(nTmp)/sizeof(nTmp[0]), true );
+	dec_dump( j, nTmp, sizeof(nTmp)/sizeof(nTmp[0]), true );
 
 	//6.Send message
+	printf("write:\n");
 	nbytes = write(s, &frame, sizeof(frame)); 
 
 	if(nbytes != sizeof(frame)) {
-		printf("[%d] [%d] nbytes!! [%d]\n", sev.type, j, nbytes);
+		printf("NG [%d] [%d] nbytes!! [%d]\n", sev.type, j, nbytes);
 		usleep(100000);
 		ret = false;
 	}
 	else {
-		printf("[%d] [%d] nbytes [%d]\n", sev.type, j, nbytes);
+		printf("OK [%d] [%d] nbytes [%d]\n", sev.type, j, nbytes);
 		// printf("[%d] OK [%d]\n", j, nbytes);
 		ret = true;
-		// usleep(10make00);
+		usleep(1000);
 	}
 	j++;
 	return ret;
@@ -354,20 +356,6 @@ void sig(int s)
 	spnav_close();
 	exit(0);
 }
-
-
-#define DBG_COLOR_BLACK "\033[0;30m"
-#define DBG_COLOR_GRAY "\033[1;30m"
-#define DBG_COLOR_RED "\033[1;31m"
-#define DBG_COLOR_GREEN "\033[0;32m"
-#define DBG_COLOR_YELLOW "\033[0;33m"
-#define DBG_COLOR_BLUE "\033[0;34m"
-#define DBG_COLOR_MAGENDA "\033[0;35m"
-#define DBG_COLOR_CYAN "\033[0;36m"
-#define DBG_COLOR_WHITE "\033[1;37m"
-
-#define DBG_COLOR_DK_WHITE "\033[37m"
-#define DBG_EOF_COLOR   "\033[0;37m"
 
 
 /************************************************************/
